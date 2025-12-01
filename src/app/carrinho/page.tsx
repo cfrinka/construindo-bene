@@ -1,0 +1,471 @@
+"use client";
+
+import { useCart } from "@/contexts/CartContext";
+import { useAuth } from "@/contexts/AuthContext";
+import Container from "@/components/ui/Container";
+import { H1, H2, Text } from "@/components/ui/Typography";
+import { Button } from "@/components/ui/Button";
+import { Card, CardBody } from "@/components/ui/Card";
+import ShippingCalculator from "@/components/cart/ShippingCalculator";
+import VariantSelector from "@/components/product/VariantSelector";
+import { listCollection, createOrder } from "@/lib/firebase";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+
+export default function CarrinhoPage() {
+  const { items, removeItem, updateQuantity, totalPrice, clearCart, addItem } = useCart();
+  const { user, loading: authLoading } = useAuth();
+  const router = useRouter();
+  const [shippingOption, setShippingOption] = useState<{ name: string; price: number; days: number } | null>(null);
+  const [variantSelectorOpen, setVariantSelectorOpen] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<any>(null);
+  const [processingOrder, setProcessingOrder] = useState(false);
+  const [shippingAddress, setShippingAddress] = useState({
+    name: "",
+    street: "",
+    number: "",
+    complement: "",
+    neighborhood: "",
+    city: "",
+    state: "",
+    zipCode: "",
+    phone: "",
+  });
+  const [loadingCep, setLoadingCep] = useState(false);
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.push("/");
+    }
+  }, [user, authLoading, router]);
+
+  const handleCepChange = async (cep: string) => {
+    const cleanCep = cep.replace(/\D/g, "");
+    setShippingAddress({ ...shippingAddress, zipCode: cep });
+
+    if (cleanCep.length === 8) {
+      setLoadingCep(true);
+      try {
+        const response = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`);
+        const data = await response.json();
+
+        if (!data.erro) {
+          setShippingAddress(prev => ({
+            ...prev,
+            street: data.logradouro || "",
+            neighborhood: data.bairro || "",
+            city: data.localidade || "",
+            state: data.uf || "",
+          }));
+        } else {
+          alert("CEP não encontrado");
+        }
+      } catch (error) {
+        console.error("Erro ao buscar CEP:", error);
+        alert("Erro ao buscar CEP");
+      } finally {
+        setLoadingCep(false);
+      }
+    }
+  };
+
+  const handleShippingCepCalculated = (cep: string, addressData: any) => {
+    setShippingAddress(prev => ({
+      ...prev,
+      zipCode: cep,
+      street: addressData.logradouro || "",
+      neighborhood: addressData.bairro || "",
+      city: addressData.localidade || "",
+      state: addressData.uf || "",
+    }));
+  };
+
+  const isAddressComplete = () => {
+    return (
+      shippingAddress.name.trim() !== "" &&
+      shippingAddress.street.trim() !== "" &&
+      shippingAddress.number.trim() !== "" &&
+      shippingAddress.neighborhood.trim() !== "" &&
+      shippingAddress.city.trim() !== "" &&
+      shippingAddress.state.trim() !== "" &&
+      shippingAddress.zipCode.trim() !== "" &&
+      shippingAddress.phone.trim() !== ""
+    );
+  };
+
+  const handleCheckout = async () => {
+    if (!user || !shippingOption) return;
+
+    if (!isAddressComplete()) {
+      alert("Por favor, preencha todos os campos do endereço de entrega.");
+      return;
+    }
+
+    setProcessingOrder(true);
+    try {
+      const result = await createOrder({
+        userId: user.uid,
+        items: items.map(item => ({
+          productId: item.id,
+          title: item.title,
+          price: item.price,
+          quantity: item.quantity,
+          size: item.size,
+          color: item.color,
+          cover: item.cover,
+        })),
+        total: totalPrice + shippingOption.price,
+        shipping: shippingOption,
+        shippingAddress,
+      });
+
+      if ((result as any).ok) {
+        clearCart();
+        alert(`Pedido #${(result as any).orderNumber} criado com sucesso!`);
+        router.push("/perfil");
+      } else {
+        alert("Erro ao criar pedido");
+      }
+    } catch (error) {
+      console.error("Error creating order:", error);
+      alert("Erro ao criar pedido");
+    } finally {
+      setProcessingOrder(false);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <main className="min-h-screen">
+        <Container className="py-20">
+          <div className="text-center">Carregando...</div>
+        </Container>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return null;
+  }
+
+  if (items.length === 0) {
+    return (
+      <main className="min-h-screen">
+        <Container className="py-20">
+          <H1>Carrinho</H1>
+          <div className="mt-8 text-center">
+            <Text>Seu carrinho está vazio</Text>
+            <Button href="/produtos" className="mt-4">
+              Ver produtos
+            </Button>
+          </div>
+        </Container>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen">
+      <Container className="py-20">
+        <H1>Carrinho</H1>
+
+        <div className="mt-8 grid gap-8 lg:grid-cols-3">
+          <div className="lg:col-span-2 space-y-4">
+            {items.map((item, index) => {
+              // Check if this is the first item of a product group
+              const isFirstOfProduct = index === 0 || items[index - 1].id !== item.id;
+              // Count how many variants of this product exist
+              const productVariantCount = items.filter(i => i.id === item.id).length;
+              
+              return (
+              <div key={item.variantKey || `${item.id}-${index}`}>
+                {isFirstOfProduct && productVariantCount > 1 && (
+                  <div className="mb-2 flex items-center justify-between">
+                    <Text className="text-sm font-medium text-neutral-700">
+                      {item.title} - {productVariantCount} variantes
+                    </Text>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={async () => {
+                        // Fetch product data from Firebase to get available sizes/colors
+                        const result = await listCollection('products');
+                        if ((result as any).ok) {
+                          const products = (result as any).items;
+                          const productData = products.find((p: any) => p.id === item.id);
+                          setSelectedProduct({
+                            id: item.id,
+                            title: item.title,
+                            price: item.price,
+                            cover: item.cover,
+                            sizes: productData?.sizes || [],
+                            colors: productData?.colors || []
+                          });
+                          setVariantSelectorOpen(true);
+                        }
+                      }}
+                      className="text-sm text-brand-primary hover:text-brand-primary/80"
+                    >
+                      + Adicionar outra variante
+                    </Button>
+                  </div>
+                )}
+              <Card className="overflow-hidden">
+                <CardBody className="flex gap-4 p-4">
+                  <div className="relative w-24 h-24 bg-neutral-100 rounded-md overflow-hidden flex-shrink-0">
+                    {item.cover ? (
+                      <Image src={item.cover} alt={item.title} fill className="object-cover" />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center text-xs text-neutral-500">
+                        Sem imagem
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-display font-semibold text-lg">{item.title}</h3>
+                    <div className="flex items-center gap-2 mt-1">
+                      {item.size && (
+                        <span className="text-xs bg-neutral-100 px-2 py-1 rounded">
+                          Tamanho: {item.size}
+                        </span>
+                      )}
+                      {item.color && (
+                        <span className="text-xs bg-neutral-100 px-2 py-1 rounded">
+                          Cor: {item.color}
+                        </span>
+                      )}
+                    </div>
+                    <Text className="mt-1">R$ {item.price.toFixed(2)}</Text>
+
+                    <div className="flex items-center gap-3 mt-3">
+                      <div className="flex items-center gap-2 border border-neutral-300 rounded-md">
+                        <button
+                          onClick={() => {
+                            const key = item.variantKey || `${item.id}-${item.size || 'default'}-${item.color || 'default'}`;
+                            updateQuantity(key, item.quantity - 1);
+                          }}
+                          className="px-3 py-1 hover:bg-neutral-50"
+                        >
+                          −
+                        </button>
+                        <span className="px-2">{item.quantity}</span>
+                        <button
+                          onClick={() => {
+                            const key = item.variantKey || `${item.id}-${item.size || 'default'}-${item.color || 'default'}`;
+                            updateQuantity(key, item.quantity + 1);
+                          }}
+                          className="px-3 py-1 hover:bg-neutral-50"
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const key = item.variantKey || `${item.id}-${item.size || 'default'}-${item.color || 'default'}`;
+                          removeItem(key);
+                        }}
+                        className="text-red-600 hover:text-red-700"
+                      >
+                        Remover
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <p className="font-semibold text-lg">
+                      R$ {(item.price * item.quantity).toFixed(2)}
+                    </p>
+                  </div>
+                </CardBody>
+              </Card>
+              </div>
+            );
+            })}
+          </div>
+
+          <div className="lg:col-span-1">
+            <Card className="sticky top-4">
+              <CardBody>
+                <H2 size="text-2xl">Resumo</H2>
+
+                <div className="space-y-2 text-sm mt-4">
+                  <div className="flex justify-between">
+                    <Text className="text-sm">Subtotal</Text>
+                    <span>R$ {totalPrice.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <Text className="text-sm">Frete</Text>
+                    {shippingOption ? (
+                      <span>
+                        {shippingOption.price === 0 ? (
+                          <span className="text-green-600">Grátis</span>
+                        ) : (
+                          `R$ ${shippingOption.price.toFixed(2)}`
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-neutral-500 text-xs">Calcular</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="border-t border-neutral-200 my-4" />
+
+                <ShippingCalculator 
+                  onShippingSelect={setShippingOption} 
+                  cartTotal={totalPrice}
+                  onCepCalculated={handleShippingCepCalculated}
+                />
+
+                {/* Shipping Address Form - Only show after shipping is calculated */}
+                {shippingOption && (
+                  <>
+                    <div className="border-t border-neutral-200 my-4" />
+
+                    <div className="space-y-3">
+                      <Text className="font-semibold text-sm">Endereço de Entrega</Text>
+                  
+                  <input
+                    type="text"
+                    placeholder="Nome completo *"
+                    value={shippingAddress.name}
+                    onChange={(e) => setShippingAddress({ ...shippingAddress, name: e.target.value })}
+                    className="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                  />
+                  
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="col-span-1 relative">
+                      <input
+                        type="text"
+                        placeholder="CEP *"
+                        value={shippingAddress.zipCode}
+                        onChange={(e) => handleCepChange(e.target.value)}
+                        className="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                        maxLength={9}
+                      />
+                      {loadingCep && (
+                        <span className="absolute right-2 top-2 text-xs text-neutral-500">
+                          Buscando...
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Telefone *"
+                      value={shippingAddress.phone}
+                      onChange={(e) => setShippingAddress({ ...shippingAddress, phone: e.target.value })}
+                      className="col-span-2 px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-4 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Rua *"
+                      value={shippingAddress.street}
+                      onChange={(e) => setShippingAddress({ ...shippingAddress, street: e.target.value })}
+                      className="col-span-3 px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Nº *"
+                      value={shippingAddress.number}
+                      onChange={(e) => setShippingAddress({ ...shippingAddress, number: e.target.value })}
+                      className="col-span-1 px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                    />
+                  </div>
+                  
+                  <input
+                    type="text"
+                    placeholder="Complemento (opcional)"
+                    value={shippingAddress.complement}
+                    onChange={(e) => setShippingAddress({ ...shippingAddress, complement: e.target.value })}
+                    className="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                  />
+                  
+                  <input
+                    type="text"
+                    placeholder="Bairro *"
+                    value={shippingAddress.neighborhood}
+                    onChange={(e) => setShippingAddress({ ...shippingAddress, neighborhood: e.target.value })}
+                    className="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                  />
+                  
+                  <div className="grid grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Cidade *"
+                      value={shippingAddress.city}
+                      onChange={(e) => setShippingAddress({ ...shippingAddress, city: e.target.value })}
+                      className="col-span-2 px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                    />
+                    <input
+                      type="text"
+                      placeholder="UF *"
+                      value={shippingAddress.state}
+                      onChange={(e) => setShippingAddress({ ...shippingAddress, state: e.target.value })}
+                      className="col-span-1 px-3 py-2 border border-neutral-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                      maxLength={2}
+                    />
+                  </div>
+                </div>
+
+                    <div className="border-t border-neutral-200 my-4" />
+
+                    <div className="flex justify-between text-lg font-semibold mb-6">
+                      <span>Total</span>
+                      <span>R$ {(totalPrice + (shippingOption?.price || 0)).toFixed(2)}</span>
+                    </div>
+
+                    <Button 
+                      variant="primary" 
+                      className="w-full mb-3" 
+                      disabled={!shippingOption || !isAddressComplete() || processingOrder}
+                      onClick={handleCheckout}
+                    >
+                      {processingOrder ? "Processando..." : "Finalizar compra"}
+                    </Button>
+                    
+                    {!isAddressComplete() && (
+                      <Text className="text-xs text-red-600 text-center mb-2">
+                        Preencha todos os campos obrigatórios (*)
+                      </Text>
+                    )}
+                  </>
+                )}
+
+                <Button variant="outline" className="w-full" onClick={clearCart}>
+                  Limpar carrinho
+                </Button>
+              </CardBody>
+            </Card>
+          </div>
+        </div>
+      </Container>
+
+      {variantSelectorOpen && selectedProduct && (
+        <VariantSelector
+          availableSizes={selectedProduct.sizes}
+          availableColors={selectedProduct.colors}
+          onSelect={(size, color) => {
+            addItem({
+              id: selectedProduct.id,
+              title: selectedProduct.title,
+              price: selectedProduct.price,
+              cover: selectedProduct.cover,
+              size,
+              color,
+            });
+            setVariantSelectorOpen(false);
+          }}
+          onCancel={() => setVariantSelectorOpen(false)}
+        />
+      )}
+    </main>
+  );
+}

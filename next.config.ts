@@ -8,7 +8,14 @@ const nextConfig: NextConfig = {
       {
         protocol: 'https',
         hostname: 'firebasestorage.googleapis.com',
-        pathname: '/v0/b/**',
+      },
+      {
+        protocol: 'https',
+        hostname: '*.firebasestorage.app',
+      },
+      {
+        protocol: 'https',
+        hostname: 'picsum.photos',
       },
     ],
   },
